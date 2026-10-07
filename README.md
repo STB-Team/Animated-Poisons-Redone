@@ -8,8 +8,9 @@ What the DLL does:
 
 - catches the moment a poison is applied (`PoisonedWeapon` event) and plays the pose through OMA with the mod's own
   behavior events (Nemesis / Pandora patch of the mod), the clip is picked by Open Animation Replacer;
-- puts the poison's / arrow's **own model** in the hand (3rd and 1st person), positions from
-  `SKSE/Plugins/AnimatedPoisonsRedone/{ThirdPerson,FirstPerson}/*.json`, built-in values otherwise;
+- puts the poison's / arrow's **own model** in the hand (3rd and 1st person): bottles placed from
+  `SKSE/Plugins/AnimatedPoisonsRedone/{ThirdPerson,FirstPerson}/*.json` (built-in values otherwise), arrows and bolts
+  fitted along the shaft of the loaded model (a JSON entry overrides); the loaded crossbow bolt stays in its groove;
 - draws a sheathed weapon first, waits for a draw / sheathe in progress, skips the animation while attacking, blocking,
   casting, dodging...; the pose is interrupted by attacks, blocks, dodges (TK Dodge RE, The Ultimate Dodge Mod), BFCO;
 - repeats the pose seamlessly for a poison applied in its last 40 % (`fRepeatWindow`), follows 1st / 3rd person switches during the pose;
@@ -41,14 +42,14 @@ Address Library format 5 (`versionlib-1-7-*.bin`) is read, an id missing from th
 | `src/Hooks.cpp` | `PlayerCharacter` vtable hooks (Update, UpdateAnimation, NotifyAnimationGraph), event sinks |
 | `src/Poison.cpp` | the session: when to play, draw / wait / skip, the pose, interrupts, repeats, view switch |
 | `src/HandItems.cpp` | the poison's / projectile's own model on the 3P / 1P skeleton |
-| `src/Placement.cpp` | positions: JSON, then the built-in table (`BuiltinTransforms.inl`, from the original mod's script) |
+| `src/Placement.cpp` | positions: JSON, then built-in values (bottles: `BuiltinTransforms.inl`, from the original mod's script; arrows / bolts: the steel arrow's placement, fitted along the shaft in `HandItems.cpp`) |
 | `src/Diagnostics.cpp` | the startup report in the log: game, SKSE, Address Library, dependencies, files, behavior graphs |
 | `src/Flow.cpp` | tiny C++20 coroutines (wait for time / a condition) the session is written with |
 | `src/Settings.cpp` | the INI (6 keys) and the fixed values |
 
 ## Credits
 
-Animations, models and positions: GiraPomba (*Immersive Interactions - New Anims*), JaySerpa (*Immersive Interactions*),
+Animations, models and positions: GiraPomba (*Immersive Interactions - New Anims*),
 Xing and GiraPomba (*Offset Movement Animation*). CommonLibSSE-NG: CharmedBaryon and contributors. Plugin: STB Team.
 
 License: MIT (see `LICENSE`).
