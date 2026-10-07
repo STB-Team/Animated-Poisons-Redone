@@ -133,19 +133,22 @@ namespace Hooks
 		{
 			static bool thunk(RE::IAnimationGraphManagerHolder* a_this, const RE::BSFixedString& a_event)
 			{
-				// Re-entered from inside our own call: a mod hooked the slot after us (its "original" is this thunk) and we
-				// took the slot back on top of it (EnsureNotifyHook) -- so it calls us again. Straight on to what was in the
-				// slot when we installed, without our logic: the chain runs once, the other mod stays in it (Dynamic Armor
-				// Physics + 4.7.3: an endless us -> it -> us loop, stack overflow on load)
-				if (inside) {
+				// The same event re-entered from inside our own call: a mod hooked the slot after us (its "original" is this
+				// thunk) and we took the slot back on top of it (EnsureNotifyHook) -- so it passes the event on to us again.
+				// Straight on to what was in the slot when we installed, without our logic: the chain runs once, the other mod
+				// stays in it (Dynamic Armor Physics + 4.7.3: an endless us -> it -> us loop, stack overflow on load).
+				// Another event sent from inside the call (Notify Events dispatches its fake graph events there, their sinks
+				// may send to the player) is a new send: the whole chain, as without the re-hook (4.7.4-4.7.7 sent it straight
+				// to `first`: past the other mods and the pose's hold). Too deep = a mod turning events into each other: `first`
+				if (depth > 0 && (depth >= kMaxDepth || (calls[depth - 1].holder == a_this && calls[depth - 1].event == a_event.data()))) {
 					return first(a_this, a_event);
 				}
 				if (Poison::DeferPoseExit(a_event)) {
 					return true;  // passed to the graph one update later (Poison::PostAnimUpdate)
 				}
-				inside = true;
+				calls[depth++] = { a_this, a_event.data() };
 				const bool result = func(a_this, a_event);
-				inside = false;
+				--depth;
 				if (Poison::Listening()) {
 					Poison::OnInputEvent(a_event);
 				}
@@ -153,14 +156,22 @@ namespace Hooks
 			}
 			static inline REL::Relocation<decltype(thunk)> func;   // the slot's previous value (after a re-hook: the other mod's hook)
 			static inline REL::Relocation<decltype(thunk)> first;  // the slot's value when we installed (vanilla or earlier mods)
-			static inline thread_local bool                inside{ false };
+
+			struct Call
+			{
+				RE::IAnimationGraphManagerHolder* holder;
+				const char*                       event;  // BSFixedString data: one pointer per string in the game's string pool
+			};
+			static constexpr int                    kMaxDepth = 8;
+			static inline thread_local Call         calls[kMaxDepth]{};  // our calls in progress on this thread, innermost last
+			static inline thread_local int          depth{ 0 };
 		};
 
 		// Ultimate Combat SE (UltimateCombat.dll, SE only) writes its own NotifyAnimationGraph into this very slot on
 		// kDataLoaded without keeping the previous one (it calls the vanilla function directly) -- loaded after us it
 		// silently removes our hook. Checked every frame: overwritten -> hooked again on top (we then call its hook, it
 		// calls vanilla; we see even the events it swallows). Mods that keep us as their original (Dynamic Armor Physics,
-		// SkyParkourNG) call us back from inside -- handled by PlayerNotify::inside. A few times at most.
+		// SkyParkourNG) call us back from inside -- handled in PlayerNotify::thunk (Notify Events too). A few times at most.
 		void ReportSlots();
 
 		void EnsureNotifyHook()

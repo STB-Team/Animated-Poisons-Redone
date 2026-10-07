@@ -25,9 +25,20 @@ struct Settings
 		"RollStart, RollTrigger, SidestepTrigger, ForwardRollStart, BackwardRollStart, Left_RollStart, Right_RollStart, "
 		"Left_ForwardRollStart, Right_ForwardRollStart, Left_BackwardRollStart, Right_BackwardRollStart, "  // The Ultimate Dodge Mod
 		"SneakSprintStartRoll, "                                                                          // vanilla sneak roll
-		"BFCOAttackstart_0, BFCOAttackstart_1, BFCOAttackStart_Comb, BfcoAttackSwim";                     // BFCO normal attacks
-	// IsAttacking: any attack (a backup for attack events that do not pass the hook); bIsDodging / bInIframe: TK Dodge RE
-	static constexpr auto kInterruptVariables = "IsAttacking, bIsDodging, bInIframe";
+		"BFCOAttackstart_0, BFCOAttackstart_1, BFCOAttackStart_Comb, BfcoAttackSwim, "                    // BFCO normal attacks
+		// the player staggered / knocked into bleedout -- by the engine or any mod (Parry for all, Unblockable / Undodgeable
+		// Hits, Valhalla ...): staggerStart / bleedOutStart are RootBehaviorGraph wildcards (0_master), the very graph under the
+		// pose's bone switch -> held like an attack, the stagger plays whole after the pose. StaggerPlayer(Bow): Jump Behavior
+		// Overhaul's 0_master; MountedStaggerStart: riding. recoilStart / recoilLargeStart: wildcards of 1HM_Behavior without a
+		// condition (taken under the pose with a one-handed weapon; Valhalla, Parry for all send them to a defender). poise_*:
+		// the stagger events of the poise mods' Nemesis patches (Loki POISE, Chocolate Poise, MaxsuPoise, Valhalla, Elden
+		// Parry). Ragdoll / paralysis / death leave the pose by themselves (Master wildcards)
+		"staggerStart, StaggerPlayer, StaggerPlayerBow, MountedStaggerStart, bleedOutStart, recoilStart, recoilLargeStart, "
+		"poise_small_start, poise_small_start_fwd, poise_med_start, poise_med_start_fwd, "
+		"poise_large_start, poise_large_start_fwd, poise_largest_start, poise_largest_start_fwd";
+	// IsAttacking: any attack (a backup for attack events that do not pass the hook); bIsDodging / bInIframe: TK Dodge RE;
+	// IsStaggering / IsRecoiling / IsBleedingOut: a stagger, recoil or bleedout set without an event through the hook
+	static constexpr auto kInterruptVariables = "IsAttacking, bIsDodging, bInIframe, IsStaggering, IsRecoiling, IsBleedingOut";
 	// the events the Nemesis patch stbgpi leaves the pose on (Master wildcards -> Root while bOffsetGPMA) -- keep in sync
 	// with EVENTS in the mod's build.py
 	static constexpr auto kPoseExitEvents =
