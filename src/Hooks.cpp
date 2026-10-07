@@ -16,7 +16,7 @@ namespace Hooks
 		// 8 more bytes around +0x2D8, which CommonLibSSE-NG does not know (its GetInfoRuntimeData() gives 0x970 there).
 		// The offset is read from the game's own poison confirm callback (SE 39407 / AE 40482), the very function that
 		// sends this event: it starts `40 53 48 83 EC xx 48 8B 05 <player> 48 83 B8 <disp32> 00` = cmp [player+disp], 0.
-		// Same bytes on 1.5.97, 1.6.1170 and 1.7.104 (plugins/STBIIFix/tools/check_ids.py). No match -> NG's offset.
+		// Same bytes on 1.5.97, 1.6.1170 and 1.7.104 (plugins/AnimatedPoisonsRedone/tools/check_ids.py). No match -> NG's offset.
 		std::ptrdiff_t PendingPoisonOffset()
 		{
 			static const std::ptrdiff_t offset = [] {
@@ -133,22 +133,34 @@ namespace Hooks
 		{
 			static bool thunk(RE::IAnimationGraphManagerHolder* a_this, const RE::BSFixedString& a_event)
 			{
+				// Re-entered from inside our own call: a mod hooked the slot after us (its "original" is this thunk) and we
+				// took the slot back on top of it (EnsureNotifyHook) -- so it calls us again. Straight on to what was in the
+				// slot when we installed, without our logic: the chain runs once, the other mod stays in it (Dynamic Armor
+				// Physics + 4.7.3: an endless us -> it -> us loop, stack overflow on load)
+				if (inside) {
+					return first(a_this, a_event);
+				}
 				if (Poison::DeferPoseExit(a_event)) {
 					return true;  // passed to the graph one update later (Poison::PostAnimUpdate)
 				}
+				inside = true;
 				const bool result = func(a_this, a_event);
+				inside = false;
 				if (Poison::Listening()) {
 					Poison::OnInputEvent(a_event);
 				}
 				return result;
 			}
-			static inline REL::Relocation<decltype(thunk)> func;
+			static inline REL::Relocation<decltype(thunk)> func;   // the slot's previous value (after a re-hook: the other mod's hook)
+			static inline REL::Relocation<decltype(thunk)> first;  // the slot's value when we installed (vanilla or earlier mods)
+			static inline thread_local bool                inside{ false };
 		};
 
 		// Ultimate Combat SE (UltimateCombat.dll, SE only) writes its own NotifyAnimationGraph into this very slot on
 		// kDataLoaded without keeping the previous one (it calls the vanilla function directly) -- loaded after us it
 		// silently removes our hook. Checked every frame: overwritten -> hooked again on top (we then call its hook, it
-		// calls vanilla; we see even the events it swallows). A few times at most, in case someone fights for the slot.
+		// calls vanilla; we see even the events it swallows). Mods that keep us as their original (Dynamic Armor Physics,
+		// SkyParkourNG) call us back from inside -- handled by PlayerNotify::inside. A few times at most.
 		void ReportSlots();
 
 		void EnsureNotifyHook()
@@ -238,6 +250,7 @@ namespace Hooks
 		PlayerUpdateAnimation::func = player.write_vfunc(0x7D, PlayerUpdateAnimation::thunk);
 		REL::Relocation<std::uintptr_t> holder{ RE::VTABLE_PlayerCharacter[3] };
 		PlayerNotify::func = holder.write_vfunc(0x1, PlayerNotify::thunk);
+		PlayerNotify::first = PlayerNotify::func.address();
 		// what each hook wraps: not SkyrimSE.exe = another mod hooked it before us (fine if it calls the original)
 		logger::info("hooks installed: Update wraps {}, UpdateAnimation wraps {}, NotifyAnimationGraph wraps {}",
 			Diagnostics::ModuleOf(PlayerUpdate::func.address()), Diagnostics::ModuleOf(PlayerUpdateAnimation::func.address()),

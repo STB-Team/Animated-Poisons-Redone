@@ -1,4 +1,4 @@
-// Animated Poisons Redone (folder plugins/STBIIFix) -- the poison-applying animation of Immersive Interactions - New Anims
+// Animated Poisons Redone -- the poison-applying animation of Immersive Interactions - New Anims
 // through Offset Movement Animation as a standalone SKSE plugin: no Immersive Interactions, no Papyrus.
 // One DLL for SE 1.5.97, AE 1.6.x and 1.7.x (CommonLibSSE-NG + Address Library, addresses via RELOCATION_ID).
 // See README.md / AGENTS.md.

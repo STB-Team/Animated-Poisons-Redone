@@ -597,6 +597,8 @@ namespace Poison
 			g_postCheckAt = Flow::Now() + Settings::Get().moveStopCheck + 0.5f;  // after the exit blend (0.5 s)
 		}
 
+		void LogBoneSwitch();  // diagnostics, below
+
 		// every frame before the session step: did the pose end on its own (attack / block / cast -> stbgpi)?
 		void WatchPose()
 		{
@@ -712,6 +714,7 @@ namespace Poison
 			if (p.check && p.entered && !p.moveChecked && Flow::Now() - p.enteredAt >= st.moveStopCheck) {
 				p.moveChecked = true;
 				Log("after the pose's entry blend {}", State());
+				LogBoneSwitch();
 				MoveStopSafety("pose start");
 			}
 			if (p.check && !p.interrupted) {
@@ -876,6 +879,134 @@ namespace Poison
 			return nullptr;
 		}
 
+		// Diagnostics (bDebugLog): the OMA upper-body switch as the engine sees it. BSBoneSwitchGeneratorUtils::generateInternal
+		// (SE 62402) applies a child's pose only if numData (bones in the pose) <= its bone weight count -- the pose then
+		// silently does not show (Pandora 5.0 beta). Offsets from the SE database types (Havok layout, same on AE):
+		// BSBoneSwitchGenerator +0x50 pDefaultGenerator, +0x58 ChildrenA (hkArray: data, size); BoneData +0x30 pGenerator,
+		// +0x38 bone weights; hkbBoneWeightArray +0x30 weights (hkArray<float>); hkbCharacter +0x50 setup, +0x98 numPoseLocal;
+		// hkbCharacterSetup +0x20 skeleton; hkaSkeleton +0x28 bones (hkArray)
+		void LogBoneSwitch()
+		{
+			if (!Settings::Get().debugLog) {
+				return;
+			}
+			RE::BSTSmartPointer<RE::BSAnimationGraphManager> manager;
+			if (!P()->GetAnimationGraphManager(manager) || !manager) {
+				return;
+			}
+			const auto rd = [](std::uintptr_t a_base, std::ptrdiff_t a_off) { return a_base ? *reinterpret_cast<std::uintptr_t*>(a_base + a_off) : 0; };
+			const auto ri = [](std::uintptr_t a_base, std::ptrdiff_t a_off) { return a_base ? *reinterpret_cast<std::int32_t*>(a_base + a_off) : -1; };
+			for (std::uint32_t i = 0; i < manager->graphs.size(); ++i) {
+				const auto graph = manager->graphs[i].get();
+				if (!graph || !graph->behaviorGraph) {
+					continue;
+				}
+				const auto character = reinterpret_cast<std::uintptr_t>(&graph->characterInstance);
+				const auto setup = rd(character, 0x50);
+				const auto skeleton = rd(setup, 0x20);
+				const int  bones = ri(skeleton, 0x30);
+				const int  poseLocal = ri(character, 0x98);
+				std::string children;
+				bool        found = false;
+				if (const auto nodes = reinterpret_cast<RE::hkArray<NodeInfo>*>(graph->behaviorGraph->activeNodes.get())) {
+					for (auto& info : *nodes) {
+						const auto node = info.nodeClone;
+						if (!node || !node->name.c_str() || _stricmp(node->name.c_str(), "xComState_BoneSwitchGenerator") != 0) {
+							continue;
+						}
+						found = true;
+						const auto self = reinterpret_cast<std::uintptr_t>(node);
+						const auto data = rd(self, 0x58);
+						const int  count = ri(self, 0x60);
+						for (int c = 0; data && c < count; ++c) {
+							const auto boneData = rd(data, c * 8);
+							const auto weights = rd(boneData, 0x38);
+							children += fmt::format(" child {}: generator {}, weights {}", c, rd(boneData, 0x30) ? "yes" : "NO",
+								weights ? std::to_string(ri(weights, 0x38)) : std::string("NO ARRAY"));
+						}
+						children += fmt::format(" (default generator {})", rd(self, 0x50) ? "yes" : "NO");
+						break;
+					}
+				}
+				logger::info("bone switch [{}] {}: skeleton bones {}, pose bones {}; xComState_BoneSwitchGenerator {}{}", i,
+					graph->projectName.c_str() ? graph->projectName.c_str() : "?", bones, poseLocal, found ? "active:" : "not active", children);
+			}
+		}
+
+		// Character property bone weights shorter than the skeleton (v49, Pandora 5.0 beta: its character template has 99
+		// weights per array, a skeleton like XP32 has 126 bones). BSBoneSwitchGeneratorUtils::generateInternal (SE 62402)
+		// skips a child whose weights are fewer than the pose's bones, so OMA's upper body (property UpperBody) never shows
+		// in 3P. Padded here once per array, in place: a new bone takes its parent's weight (a root: 0); arrays for another
+		// bone set (shorter than the vanilla 99, e.g. SneakMagic* 85) and long-enough ones (Nemesis) are left alone. The
+		// character data is shared by every actor of that project -- they all get the same, correct length. The new buffer
+		// is marked "do not deallocate" for Havok and never freed (a few arrays per project, once).
+		// Offsets (SE database types): hkbCharacter +0x50 setup; hkbCharacterSetup +0x20 skeleton, +0x40 character data;
+		// hkaSkeleton +0x18 parentIndices (hkArray<int16>), +0x28 bones; hkbCharacterData +0x80 property values;
+		// hkbVariableValueSet +0x30 variant values (hkArray<hkReferencedObject*>); hkbBoneWeightArray +0x30 weights (hkArray<float>)
+		void PadBoneWeights()
+		{
+			RE::BSTSmartPointer<RE::BSAnimationGraphManager> manager;
+			if (!P()->GetAnimationGraphManager(manager) || !manager) {
+				return;
+			}
+			constexpr int kVanillaBones = 99;
+			static const auto weightsVtbl = RE::VTABLE_hkbBoneWeightArray[0].address();
+			const auto rd = [](std::uintptr_t a_base, std::ptrdiff_t a_off) { return a_base ? *reinterpret_cast<std::uintptr_t*>(a_base + a_off) : 0; };
+			const auto ri = [](std::uintptr_t a_base, std::ptrdiff_t a_off) { return a_base ? *reinterpret_cast<std::int32_t*>(a_base + a_off) : 0; };
+			for (auto& graphPtr : manager->graphs) {
+				const auto graph = graphPtr.get();
+				// human 3P projects only: the 99 threshold is the vanilla human skeleton; a werewolf / vampire lord / horse
+				// project (the player transformed at load) has its own skeleton and arrays -- left alone (4.7.7)
+				const auto project = graph && graph->projectName.c_str() ? std::string_view(graph->projectName.c_str()) : std::string_view{};
+				if (_strnicmp(project.data(), "DefaultMale", 11) != 0 && _strnicmp(project.data(), "DefaultFemale", 13) != 0) {
+					continue;
+				}
+				const auto setup = rd(reinterpret_cast<std::uintptr_t>(&graph->characterInstance), 0x50);
+				const auto skeleton = rd(setup, 0x20);
+				const auto data = rd(setup, 0x40);
+				const int  bones = ri(skeleton, 0x30);
+				const auto parents = reinterpret_cast<const std::int16_t*>(rd(skeleton, 0x18));
+				const int  parentCount = ri(skeleton, 0x20);
+				const auto values = rd(data, 0x80);
+				const auto variants = reinterpret_cast<std::uintptr_t*>(rd(values, 0x30));
+				const int  variantCount = ri(values, 0x38);
+				if (!parents || parentCount < bones || !variants || bones <= kVanillaBones) {
+					continue;
+				}
+				int padded = 0;
+				int from = 0;
+				for (int v = 0; v < variantCount; ++v) {
+					const auto obj = variants[v];
+					if (!obj || *reinterpret_cast<std::uintptr_t*>(obj) != weightsVtbl) {
+						continue;
+					}
+					auto&     weights = *reinterpret_cast<float**>(obj + 0x30);
+					auto&     size = *reinterpret_cast<std::int32_t*>(obj + 0x38);
+					auto&     capacity = *reinterpret_cast<std::int32_t*>(obj + 0x3C);
+					const int old = size;
+					if (!weights || old < kVanillaBones || old >= bones) {
+						continue;
+					}
+					auto buffer = new float[static_cast<std::size_t>(bones)];  // owned by the character data from now on
+					std::copy(weights, weights + old, buffer);
+					for (int b = old; b < bones; ++b) {
+						const int parent = parents[b];
+						buffer[b] = parent >= 0 && parent < b ? buffer[parent] : 0.0f;
+					}
+					weights = buffer;
+					std::atomic_thread_fence(std::memory_order_release);
+					capacity = static_cast<std::int32_t>(0x80000000u | static_cast<std::uint32_t>(bones));  // DONT_DEALLOCATE
+					size = bones;
+					from = old;
+					++padded;
+				}
+				if (padded > 0) {
+					logger::info("bone weights of {}: {} arrays padded {} -> {} (the skeleton's bones; Pandora's character template)",
+						graph->projectName.c_str() ? graph->projectName.c_str() : "?", padded, from, bones);
+				}
+			}
+		}
+
 		// ---- the session: checks, draw, the pose, its end; a chained repeat restarts the clip in place ----------
 
 		Flow::Task PoisonFlow(RE::AlchemyItem* a_poison)
@@ -987,6 +1118,7 @@ namespace Poison
 				}
 			}
 
+			PadBoneWeights();  // the graphs of this load (a no-op once padded)
 			SetAnim(60);
 			if (!chain && !bow && EquippedType(false) == 12 && P()->AsActorState()->IsWeaponDrawn()) {
 				HoldBolt(true);
@@ -1349,6 +1481,7 @@ namespace Poison
 				SetAnim(0);
 			}
 			g_setupCheckAt = Flow::Now() + 3.0f;
+			PadBoneWeights();
 		}
 		if (g_setupCheckAt >= 0.0f && Flow::Now() >= g_setupCheckAt) {
 			g_setupCheckAt = -1.0f;
