@@ -1,0 +1,214 @@
+diff --git a/include/REL/ID.h b/include/REL/ID.h
+index 8d7f2be2..ad39a327 100644
+--- a/include/REL/ID.h
++++ b/include/REL/ID.h
+@@ -181,12 +181,10 @@ namespace REL
+                     });
+ 
+             bool failed = false;
+-            if (it == _id2offset.end()) {
++            // STB: an id missing from the table fails loudly on every runtime. Upstream checked the exact
++            // match only on VR, and lower_bound silently returned the NEXT id's address elsewhere.
++            if (it == _id2offset.end() || it->id != a_id) {
+                 failed = true;
+-            } else if SKYRIM_REL_VR_CONSTEXPR (Module::IsVR()) {
+-                if (it->id != a_id) {
+-                    failed = true;
+-                }
+             }
+             if (failed) {
+                 stl::report_and_fail(
+@@ -224,6 +222,11 @@ namespace REL
+ 
+             inline void ignore(std::streamsize a_count) { _stream.ignore(a_count); }
+ 
++            inline void read_bytes(void *a_dst, std::size_t a_count)
++            {
++                _stream.read(static_cast<char *>(a_dst), static_cast<std::streamsize>(a_count));
++            }
++
+             template<class T>
+             inline void readin(T &a_val)
+             {
+@@ -253,6 +256,11 @@ namespace REL
+             {
+                 std::int32_t format{};
+                 a_in.readin(format);
++                // STB: Skyrim 1.7.x ships Address Library format 5 (versionlib-1-7-*.bin) where AE expects 2.
++                if (format == 5 && a_formatVersion == 2) {
++                    read_v5(a_in);
++                    return;
++                }
+                 if (format != a_formatVersion) {
+                     stl::report_and_fail(
+                             std::format(
+@@ -277,6 +285,25 @@ namespace REL
+                 }
+             }
+ 
++            // Format 5: int32 version[4], char name[64], int64 pointer size, int32 count, then uint32 RVA[count]
++            // indexed by id directly (0 = no such id in this build).
++            void read_v5(istream_t &a_in)
++            {
++                _format = 5;
++                std::int32_t version[4]{};
++                a_in.readin(version);
++                a_in.ignore(64);
++                std::int64_t pointerSize{};
++                a_in.readin(pointerSize);
++                _pointerSize = static_cast<std::int32_t>(pointerSize);
++                a_in.readin(_addressCount);
++                for (std::size_t i = 0; i < std::extent_v<decltype(version)>; ++i) {
++                    _version[i] = static_cast<std::uint16_t>(version[i]);
++                }
++            }
++
++            [[nodiscard]] std::int32_t format() const noexcept { return _format; }
++
+             [[nodiscard]] std::size_t address_count() const noexcept { return static_cast<std::size_t>(_addressCount); }
+ 
+             [[nodiscard]] std::uint64_t pointer_size() const noexcept { return static_cast<std::uint64_t>(_pointerSize); }
+@@ -285,6 +312,7 @@ namespace REL
+ 
+         private:
+             Version      _version;
++            std::int32_t _format{0};
+             std::int32_t _pointerSize{0};
+             std::int32_t _addressCount{0};
+         };
+@@ -324,6 +352,8 @@ namespace REL
+ 
+         bool load_file(stl::zwstring a_filename, Version a_version, std::uint8_t a_formatVersion, bool a_failOnError);
+ 
++        bool load_v5(istream_t &a_in, header_t a_header, Version a_version, bool a_failOnError);
++
+ #ifdef ENABLE_SKYRIM_VR
+         bool load_csv(stl::zwstring a_filename, Version a_version, bool a_failOnError);
+ #endif
+diff --git a/include/REL/Module.h b/include/REL/Module.h
+index 54a484c7..9230946d 100644
+--- a/include/REL/Module.h
++++ b/include/REL/Module.h
+@@ -164,16 +164,7 @@ namespace REL
+ 			_instance._filename = _instance._filePath = a_filename.data();
+ 			_instance._version = a_version;
+ 			if (a_runtime == Runtime::Unknown) {
+-				switch (a_version[1]) {
+-					case 4:
+-						_instance._runtime = Runtime::VR;
+-						break;
+-					case 6:
+-						_instance._runtime = Runtime::AE;
+-						break;
+-					default:
+-						_instance._runtime = Runtime::SE;
+-				}
++				_instance._runtime = classify(a_version);
+ 			} else {
+ 				_instance._runtime = a_runtime;
+ 			}
+@@ -330,21 +321,26 @@ namespace REL
+ 
+ 		void load_segments();
+ 
++		// STB: 1.4.x is VR, 1.5.x is SE, 1.6.x and everything newer (1.7.x) is AE.
++		// Upstream treated every minor other than 4 and 6 as SE, so 1.7.x loaded SE ids.
++		[[nodiscard]] static Runtime classify(const Version& a_version) noexcept
++		{
++			switch (a_version[1]) {
++				case 4:
++					return Runtime::VR;
++				case 5:
++					return Runtime::SE;
++				default:
++					return a_version[1] > 5 ? Runtime::AE : Runtime::SE;
++			}
++		}
++
+ 		bool load_version(bool a_failOnError)
+ 		{
+ 			const auto version = GetFileVersion(_filePath);
+ 			if (version) {
+ 				_version = *version;
+-				switch (_version[1]) {
+-					case 4:
+-						_runtime = Runtime::VR;
+-						break;
+-					case 6:
+-						_runtime = Runtime::AE;
+-						break;
+-					default:
+-						_runtime = Runtime::SE;
+-				}
++				_runtime = classify(_version);
+ 				return true;
+ 			}
+ 			return stl::report_and_error(
+diff --git a/include/SKSE/Version.h b/include/SKSE/Version.h
+index 6e12abce..388e65eb 100644
+--- a/include/SKSE/Version.h
++++ b/include/SKSE/Version.h
+@@ -30,7 +30,12 @@ namespace SKSE
+     constexpr REL::Version RUNTIME_SSE_1_6_640(1, 6, 640, 0);
+ 	constexpr REL::Version RUNTIME_SSE_1_6_659(1, 6, 659, 0);
+ 	constexpr REL::Version RUNTIME_SSE_1_6_678(1, 6, 678, 0);
+-	constexpr REL::Version RUNTIME_SSE_1_6_1330(1, 5, 1330, 0);
++	constexpr REL::Version RUNTIME_SSE_1_6_1130(1, 6, 1130, 0);
++	constexpr REL::Version RUNTIME_SSE_1_6_1170(1, 6, 1170, 0);
++	constexpr REL::Version RUNTIME_SSE_1_6_1179(1, 6, 1179, 0);
++	constexpr REL::Version RUNTIME_SSE_1_6_1330(1, 6, 1330, 0);  // STB: upstream had minor 5 (typo)
++	constexpr REL::Version RUNTIME_SSE_1_7_99(1, 7, 99, 0);    // STB: Address Library format 5
++	constexpr REL::Version RUNTIME_SSE_1_7_104(1, 7, 104, 0);
+ 	constexpr auto         RUNTIME_SSE_LATEST_AE = RUNTIME_SSE_1_6_1330;
+ 	constexpr auto         RUNTIME_SSE_LATEST_SE = RUNTIME_SSE_1_5_97;
+ 	constexpr auto         RUNTIME_SSE_LATEST = RUNTIME_SSE_LATEST_AE;
+diff --git a/src/REL/ID.cpp b/src/REL/ID.cpp
+index 8d6104a0..a981ede3 100644
+--- a/src/REL/ID.cpp
++++ b/src/REL/ID.cpp
+@@ -103,6 +103,10 @@ namespace REL
+ 				return stl::report_and_error("version mismatch"sv, a_failOnError);
+ 			}
+ 
++			if (header.format() == 5) {
++				return load_v5(in, header, a_version, a_failOnError);
++			}
++
+ 			auto mapname = L"CommonLibSSEOffsets-v2-"s;
+ 			mapname += a_version.wstring();
+ 			const auto byteSize = static_cast<std::size_t>(header.address_count()) * sizeof(mapping_t);
+@@ -132,6 +136,34 @@ namespace REL
+ 		return true;
+ 	}
+ 
++	// STB: format 5 is a dense RVA table indexed by id. It is converted into the same sorted
++	// (id, offset) array as formats 1/2, so id2offset and Offset2ID work unchanged. The mapping name
++	// differs from v2 so a plugin with an older CommonLib never reads this layout as its own.
++	bool IDDatabase::load_v5(istream_t& a_in, header_t a_header, Version a_version, bool a_failOnError)
++	{
++		std::vector<std::uint32_t> table(a_header.address_count());
++		a_in.read_bytes(table.data(), table.size() * sizeof(std::uint32_t));  // short file throws (failbit)
++		const auto present = static_cast<std::size_t>(std::count_if(table.begin(), table.end(), [](auto a_rva) { return a_rva != 0; }));
++
++		auto mapname = L"CommonLibSSEOffsets-v5sparse-"s;
++		mapname += a_version.wstring();
++		const auto byteSize = present * sizeof(mapping_t);
++		if (_mmap.open(mapname, byteSize)) {
++			_id2offset = { static_cast<mapping_t*>(_mmap.data()), present };
++		} else if (_mmap.create(mapname, byteSize)) {
++			_id2offset = { static_cast<mapping_t*>(_mmap.data()), present };
++			std::size_t i = 0;
++			for (std::size_t id = 0; id < table.size(); ++id) {
++				if (table[id]) {
++					_id2offset[i++] = { static_cast<std::uint64_t>(id), static_cast<std::uint64_t>(table[id]) };
++				}
++			}
++		} else {
++			return stl::report_and_error("failed to create shared mapping"sv, a_failOnError);
++		}
++		return true;
++	}
++
+ #ifdef ENABLE_SKYRIM_VR
+ 	bool IDDatabase::load_csv(stl::zwstring a_filename, Version a_version, bool a_failOnError)
+ 	{

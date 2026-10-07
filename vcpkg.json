@@ -1,0 +1,18 @@
+{
+  "name": "animatedpoisonsredone",
+  "version-string": "4.1.0",
+  "description": "Animated Poisons Redone: poison-applying animation through Offset Movement Animation, standalone SKSE plugin (Skyrim SE 1.5.97, AE 1.6.x, 1.7.x)",
+  "homepage": "https://github.com/STB-Team",
+  "license": "MIT",
+  "dependencies": [
+    "boost-stl-interfaces",
+    "boost-type-traits",
+    "fmt",
+    "nlohmann-json",
+    "rsm-binary-io",
+    "simpleini",
+    "spdlog",
+    "xbyak"
+  ],
+  "builtin-baseline": "c3867e714dd3a51c272826eea77267876517ed99"
+}
