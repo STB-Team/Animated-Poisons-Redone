@@ -24,7 +24,7 @@ set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>" CACHE STR
 
 project(
 	AnimatedPoisonsRedone
-	VERSION 4.7.10
+	VERSION 4.7.11
 	LANGUAGES CXX
 )
 

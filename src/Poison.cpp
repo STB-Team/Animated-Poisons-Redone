@@ -46,7 +46,7 @@ namespace Poison
 		}
 
 		bool FirstPerson() { return GInt("i1stPerson") != 0; }
-		bool OMA() { return GBool("bGPMAInstalled"); }
+		bool OMA() { return GBool("bGPMAInstalled") && !Diagnostics::OmaStateMissing(); }  // its pose state too (4.7.11)
 		bool Sitting() { return P()->AsActorState()->GetSitSleepState() != RE::SIT_SLEEP_STATE::kNormal; }
 
 		// Utility.IsInMenuMode (SE 56476 / AE 56833): two flags of the UI (SE 516934 / 516935, AE 403436 / 403437).
@@ -1390,9 +1390,11 @@ namespace Poison
 			if (!Diagnostics::OarLoaded()) {
 				problems.push_back({ "Open Animation Replacer is not loaded -- no animation",
 					"Animated Poisons Redone: Open Animation Replacer is not loaded" });
-			} else if (!P()->GetGraphVariableBool("bOffsetGPMA", dummy)) {
-				problems.push_back({ "Offset Movement Animation is not in the behavior -- install OMA and run Nemesis / Pandora",
-					"Animated Poisons Redone: Offset Movement Animation not found - run Nemesis" });
+			} else if (Diagnostics::OmaStateMissing() || !P()->GetGraphVariableBool("bOffsetGPMA", dummy)) {
+				// no OMA variable, or (4.7.11) its pose state 1233 missing from Master_Behavior while our transition leads
+				// there (repaired at load, Diagnostics::RepairGraph): OMA's patch is not in the generated behavior
+				problems.push_back({ "Offset Movement Animation is not in the behavior -- tick it in Nemesis / Pandora together with Animated Poisons Redone",
+					"Offset Movement Animation is not in the behavior - tick it in Nemesis / Pandora together with Animated Poisons Redone" });
 			} else if (!PoseVars()) {
 				problems.push_back({ "the mod's Nemesis patch is not in the behavior -- run Nemesis / Pandora with the mod ticked",
 					"Animated Poisons Redone: run Nemesis with the mod ticked" });

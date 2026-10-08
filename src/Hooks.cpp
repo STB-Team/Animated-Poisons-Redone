@@ -254,6 +254,43 @@ namespace Hooks
 		}
 	}
 
+	// --- BShkbAnimationGraph::InitImpl (SE 62640 / AE 63585) + 0x22A / 0x237: call BShkbUtils::PerformOncePerLoadBehaviorOperations
+	//     (SE 62922 / AE 63845) -- once per behavior project load (the first actor of the project; others wait in
+	//     ProjectDBData::BeginInit), the template fully loaded and linked, before CloneRootGraph: the graph repair goes
+	//     here (Diagnostics::RepairGraph). Offsets checked by tools/check_ids.py (1.5.97 / 1.6.1170 / 1.7.104) and the
+	//     AE 1.6.1179 database (ida/re_iifix_sm6.py) ---------------------------------------------------------------------
+
+	namespace
+	{
+		struct LinkProject
+		{
+			static void* thunk(RE::hkbBehaviorGraph* a_graph, void* a_graphs, const char* a_folder, RE::hkbCharacter* a_character,
+				void* a_events, void* a_variables)
+			{
+				const auto result = func(a_graph, a_graphs, a_folder, a_character, a_events, a_variables);
+				Diagnostics::RepairGraph(a_graph, a_folder);
+				return result;
+			}
+			static inline REL::Relocation<decltype(thunk)> func;
+		};
+	}
+
+	void InstallEarly()
+	{
+		REL::Relocation<std::uintptr_t> site{ RELOCATION_ID(62640, 63585), REL::Relocate(0x22A, 0x237) };
+		const auto                      vanilla = REL::Relocation<std::uintptr_t>{ RELOCATION_ID(62922, 63845) }.address();
+		const auto                      code = reinterpret_cast<const std::uint8_t*>(site.address());
+		const auto target = code[0] == 0xE8 ? site.address() + 5 + *reinterpret_cast<const std::int32_t*>(code + 1) : 0;
+		if (target != vanilla) {  // another mod's hook on the site: not wrapped (docs/Hooking_and_Tools_Notes.md of Skyrim-RE)
+			logger::warn("behavior load hook not installed: the call is taken by {} -- transitions into missing states are not "
+						 "repaired",
+				code[0] == 0xE8 ? Diagnostics::ModuleOf(target) : std::string("a patch"));
+			return;
+		}
+		SKSE::AllocTrampoline(14);
+		LinkProject::func = SKSE::GetTrampoline().write_call<5>(site.address(), LinkProject::thunk);
+	}
+
 	void Install()
 	{
 		REL::Relocation<std::uintptr_t> player{ RE::VTABLE_PlayerCharacter[0] };

@@ -72,6 +72,7 @@ SKSEPluginLoad(const SKSE::LoadInterface* a_skse)
 	logger::info("{} v{}", Version::PROJECT, Version::NAME);
 	Settings::Get().Load();
 	Diagnostics::OnLoad(a_skse);
+	Hooks::InstallEarly();
 
 	auto messaging = SKSE::GetMessagingInterface();
 	if (!messaging || !messaging->RegisterListener("SKSE", SKSEMessageHandler)) {

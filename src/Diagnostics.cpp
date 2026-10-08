@@ -2,7 +2,10 @@
 
 #include "Settings.h"
 
+#include <chrono>
+#include <optional>
 #include <set>
+#include <unordered_set>
 
 #include <Psapi.h>
 #pragma comment(lib, "Psapi.lib")
@@ -120,6 +123,205 @@ namespace Diagnostics
 
 		std::set<std::string> g_graphsChecked;
 		bool                  g_oarLoaded{ false };
+
+		// --- transitions into a state that is not in their machine (request 29, 4.7.11) ----------------------------
+		// hkbStateMachine::findBestTransitions (SE 58719 / AE 59380) reads states[getStateIndex(toStateId)]->enable for
+		// every transition of the array on every event that reaches the machine, before the event, flags and condition:
+		// getStateIndex (SE 58711) gives -1 for an unknown id, nothing checks it -> states[-1] = the heap header -> crash on
+		// the first event (a player's or an NPC's, any thread). The mod's Nemesis patch run without OMA's does exactly that
+		// (APR_PoisonStart -> OMA's state 1233). Repaired in the project's template right after it is linked, before any
+		// actor clones it: the transition is pointed to an existing state and gets FLAG_DISABLED (checked only after the
+		// enable read). Clones share the template's transition arrays (the clone ctor SE 58675 add-refs wildcardTransitions;
+		// StateInfo objects are shared or copied with their transitions), so every actor of the project gets the fix.
+		// Event ids in the template are the file's own (linking only sets the graph's eventIDMap).
+		// Layout (Havok 2010, SE database types, the same on AE): hkbNode vtbl 8 getMaxNumChildren(flags), 9
+		// getChildren(flags, ChildrenInfo*) -- ChildrenInfo {hkArray<ChildInfo>*, flags}, ChildInfo 0x10 with the node at +0
+		// (as BShkbUtils::GraphTraverser::Next, SE 62944); StateInfo +0x50 transitions, +0x60 name, +0x68 stateId;
+		// TransitionInfoArray +0x10 hkArray<TransitionInfo>; TransitionInfo 0x48: +0x30 eventId, +0x34 toStateId, +0x42 flags
+
+		constexpr std::int32_t  kOmaPoseState = 1233;  // OMA's GPMAOffsetState in Master_Behavior, the target of APR_PoisonStart
+		constexpr std::uint16_t kFlagDisabled = 0x20;  // hkbStateMachine::TransitionInfo::FLAG_DISABLED
+
+		std::atomic_bool g_omaStateMissing{ false };
+
+		struct ChildInfo
+		{
+			RE::hkbNode*  node;
+			std::uint64_t unk08;
+		};
+		static_assert(sizeof(ChildInfo) == 0x10);
+
+		struct ChildInfoArray
+		{
+			ChildInfo*   data;
+			std::int32_t size;
+			std::int32_t capacityAndFlags;
+		};
+
+		struct ChildrenInfo
+		{
+			ChildInfoArray* childInfos;
+			std::uint32_t   flags;
+			std::uint32_t   pad0C;
+		};
+
+		struct TransitionInfo
+		{
+			std::uint8_t  unk00[0x30];
+			std::int32_t  eventId;           // 30
+			std::int32_t  toStateId;         // 34
+			std::int32_t  fromNestedStateId; // 38
+			std::int32_t  toNestedStateId;   // 3C
+			std::int16_t  priority;          // 40
+			std::uint16_t flags;             // 42
+			std::uint32_t pad44;             // 44
+		};
+		static_assert(sizeof(TransitionInfo) == 0x48);
+
+		struct TransitionArray
+		{
+			std::uint8_t    unk00[0x10];
+			TransitionInfo* data;  // 10
+			std::int32_t    size;  // 18
+		};
+
+		template <class T>
+		T& At(const void* a_base, std::ptrdiff_t a_offset)
+		{
+			return *reinterpret_cast<T*>(reinterpret_cast<std::uintptr_t>(a_base) + a_offset);
+		}
+
+		const char* Str(const RE::hkStringPtr& a_string) { return a_string.c_str() ? a_string.c_str() : "?"; }
+
+		// every child of the node (flags 0: not only the active ones, referenced behaviors too), into our buffer of
+		// getMaxNumChildren entries; if the node gives more, the engine grows the array on its heap -- freed here
+		void Children(RE::hkbNode* a_node, std::vector<RE::hkbNode*>& a_out)
+		{
+			const auto vtbl = *reinterpret_cast<const std::uintptr_t* const*>(a_node);
+			const auto max = reinterpret_cast<std::int32_t (*)(RE::hkbNode*, std::int32_t)>(vtbl[8])(a_node, 0);
+			std::vector<ChildInfo> buffer(static_cast<std::size_t>(std::max(max, 0)));
+			ChildInfoArray         array{ buffer.data(), 0, static_cast<std::int32_t>(0x80000000u | static_cast<std::uint32_t>(buffer.size())) };
+			ChildrenInfo           info{ &array, 0, 0 };
+			reinterpret_cast<void (*)(RE::hkbNode*, std::int32_t, ChildrenInfo*)>(vtbl[9])(a_node, 0, &info);
+			for (std::int32_t i = 0; i < array.size; ++i) {
+				if (array.data[i].node) {
+					a_out.push_back(array.data[i].node);
+				}
+			}
+			if (array.data && array.data != buffer.data() && array.capacityAndFlags >= 0) {
+				RE::hkContainerHeapAllocator::GetSingleton()->BufFree(array.data, (array.capacityAndFlags & 0x3FFFFFFF) * static_cast<std::int32_t>(sizeof(ChildInfo)));
+			}
+		}
+
+		const char* EventName(RE::hkbBehaviorGraph* a_graph, std::int32_t a_id)
+		{
+			const auto data = a_graph ? a_graph->data.get() : nullptr;
+			const auto strings = data ? data->stringData.get() : nullptr;
+			if (a_id < 0) {
+				return "(none)";
+			}
+			return strings && a_id < static_cast<std::int32_t>(strings->eventNames.size()) ? Str(strings->eventNames[a_id]) : "?";
+		}
+
+		int RepairMachine(RE::hkbStateMachine* a_machine, RE::hkbBehaviorGraph* a_graph, const char* a_project)
+		{
+			const auto& states = a_machine->states;
+			const auto  has = [&](std::int32_t a_id) {
+                for (const auto state : states) {
+                    if (state && At<std::int32_t>(state, 0x68) == a_id) {
+                        return true;
+                    }
+                }
+                return false;
+			};
+			// an existing state to point a broken transition to: the start state, else the first one
+			std::optional<std::int32_t> target;
+			if (has(a_machine->startStateID)) {
+				target = a_machine->startStateID;
+			} else if (!states.empty() && states[0]) {
+				target = At<std::int32_t>(states[0], 0x68);
+			}
+			const char* machine = Str(a_machine->name);
+			int         repaired = 0;
+			const auto  repair = [&](void* a_array, const char* a_from) {
+                if (!a_array) {
+                    return;
+                }
+                auto& transitions = *static_cast<TransitionArray*>(a_array);
+                for (std::int32_t i = 0; i < transitions.size; ++i) {
+                    auto&      t = transitions.data[i];
+                    const auto missing = t.toStateId;
+                    if (has(missing)) {
+                        continue;
+                    }
+                    if (!target) {
+                        logger::error("behavior {}: state machine '{}' has no states, its {} transition {} to state {} cannot be repaired",
+                            a_project, machine, a_from, i, missing);
+                        continue;
+                    }
+                    t.toStateId = *target;
+                    t.flags |= kFlagDisabled;
+                    ++repaired;
+                    const bool oma = missing == kOmaPoseState && _stricmp(machine, "Master_Behavior") == 0;
+                    logger::error("behavior {} ({}): state machine '{}', {} transition {} on event '{}' leads to state {}, which is not "
+                                  "in the machine -- disabled (pointed to state {}), else the first event to it crashes the game{}",
+                        a_project, Str(a_graph ? a_graph->name : a_machine->name), machine, a_from, i, EventName(a_graph, t.eventId), missing,
+                        *target, oma ? " (OMA's pose state: Offset Movement Animation is not in the behavior)" : "");
+                    if (oma) {
+                        g_omaStateMissing = true;
+                    }
+                }
+			};
+			repair(a_machine->wildcardTransitions.get(), "wildcard");
+			for (const auto state : states) {
+				if (state) {
+					repair(At<void*>(state, 0x50), fmt::format("state '{}'", Str(At<RE::hkStringPtr>(state, 0x60))).c_str());
+				}
+			}
+			return repaired;
+		}
+	}
+
+	bool OmaStateMissing() { return g_omaStateMissing; }
+
+	void RepairGraph(RE::hkbBehaviorGraph* a_root, const char* a_project)
+	{
+		if (!a_root) {
+			return;
+		}
+		static const auto machineVtbl = RE::VTABLE_hkbStateMachine[0].address();
+		static const auto graphVtbl = RE::VTABLE_hkbBehaviorGraph[0].address();
+		const auto        project = a_project && *a_project ? a_project : "?";
+		const auto        start = std::chrono::steady_clock::now();
+
+		std::unordered_set<RE::hkbNode*>                            seen{ a_root };
+		std::vector<std::pair<RE::hkbNode*, RE::hkbBehaviorGraph*>> stack{ { a_root, a_root } };
+		std::vector<RE::hkbNode*>                                   children;
+		int                                                         machines = 0;
+		int                                                         repaired = 0;
+		while (!stack.empty()) {
+			auto [node, graph] = stack.back();
+			stack.pop_back();
+			const auto vtbl = *reinterpret_cast<const std::uintptr_t*>(node);
+			if (vtbl == graphVtbl) {
+				graph = static_cast<RE::hkbBehaviorGraph*>(node);  // a referenced behavior file: its own event names
+			} else if (vtbl == machineVtbl) {
+				++machines;
+				repaired += RepairMachine(static_cast<RE::hkbStateMachine*>(node), graph, project);
+			}
+			children.clear();
+			Children(node, children);
+			for (const auto child : children) {
+				if (seen.insert(child).second) {
+					stack.emplace_back(child, graph);
+				}
+			}
+		}
+		if (repaired > 0 || Full()) {
+			const auto ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+			logger::info("behavior {} ({}) checked at load: {} nodes, {} state machines, {} transitions into missing states disabled ({:.1f} ms)",
+				project, Str(a_root->name), seen.size(), machines, repaired, ms);
+		}
 	}
 
 	std::string ModuleOf(std::uintptr_t a_address)
@@ -253,7 +455,8 @@ namespace Diagnostics
 			}
 			return false;
 		};
-		const bool oma = has(strings->eventNames, "OffsetGPMA") && has(strings->variableNames, "bOffsetGPMA");
+		// OMA's event and variable, and its pose state: a transition into the missing state 1233 was repaired at load (4.7.11)
+		const bool oma = has(strings->eventNames, "OffsetGPMA") && has(strings->variableNames, "bOffsetGPMA") && !g_omaStateMissing;
 		const bool start = has(strings->eventNames, "APR_PoisonStart");
 		const bool stop = has(strings->eventNames, "APR_PoisonStop");
 		const bool vars = has(strings->variableNames, "APR_PoisonAnim") && has(strings->variableNames, "APR_PoisonSpeed");  // v43
@@ -262,7 +465,7 @@ namespace Diagnostics
 			project, strings->eventNames.size(), strings->variableNames.size(), oma ? "yes" : "NO", start ? "yes" : "NO", stop ? "yes" : "no",
 			vars ? "yes" : "NO");
 		if (!oma) {
-			logger::error("graph {}: Offset Movement Animation is not in the behavior (OffsetGPMA / bOffsetGPMA missing) -- "
+			logger::error("graph {}: Offset Movement Animation is not in the behavior (OffsetGPMA / bOffsetGPMA or its state 1233 missing) -- "
 						  "OMA not installed or Nemesis / Pandora not run with it: no animation",
 				project);
 		} else if (!start || !vars) {
